@@ -10,8 +10,8 @@
 
 // размер блока или размер подматрицы
 #define ll long long
-#define FINAL_MATRIX_HEIGHT 200.0
-#define FINAL_MATRIX_WIDTH 300.0
+#define FINAL_MATRIX_HEIGHT 3.0
+#define FINAL_MATRIX_WIDTH 2.0
 #define MAX_2D_TREAD_COUNT 32.0
 #define TILE_SIZE (size_t)MAX_2D_TREAD_COUNT
 #define CALC_TIME_MS(start, end) (((double)((end) - (start)) * 1000.0) / CLOCKS_PER_SEC)
@@ -143,102 +143,119 @@ __global__ void matrixMultGPU(const ll* a, const ll* b, ll* result, struct Size*
 	result[index] = sum;
 }
 
-__global__ void matrixMultGPUShared(const ll* a, const ll* b, ll* result, struct Size* resultSize, struct Size aSize, struct Size bSize)
-{
-	size_t indexX = blockDim.x * blockIdx.x + threadIdx.x;
-	size_t indexY = blockDim.y * blockIdx.y + threadIdx.y;
-
-	if (indexX >= bSize.width || indexY >= aSize.height)
-	{
-		return;
-	}
-
-	// индекс начала первой подматрицы А, которую
-	// обрабатывает блок
-	size_t aBegin = aSize.width * blockDim.y * blockIdx.y;
-	// индекс конца подматрицы А, которую обрабатывает блок
-	size_t aEnd = aBegin + aSize.width - 1;
-	// шаг для перебора подматриц А
-	size_t aStep = blockDim.x;
-	// индекс начала первой подматрицы В, которую
-	// обрабатывает блок
-	size_t bBegin = blockDim.x * blockIdx.x;
-	// шаг для перебора подматриц В
-	size_t bStep = blockDim.y * bSize.width;
-
-	// Выделение разделяемой памяти для подматриц
-	__shared__ ll as[TILE_SIZE][TILE_SIZE];
-	__shared__ ll bs[TILE_SIZE][TILE_SIZE];
-	// переменная для вычисления элемента подматрицы
-	ll sum = 0;
-	for (size_t ia = aBegin, ib = bBegin; ia < aEnd; ia += aStep, ib += bStep)
-	{
-		// загрузка подматриц А и В из глобальной памяти в
-		// разделяемую
-		as[threadIdx.y][threadIdx.x] = a[ia + aSize.width * threadIdx.y + threadIdx.x];
-		bs[threadIdx.y][threadIdx.x] = b[ib + bSize.width * threadIdx.y + threadIdx.x];
-		// синхронизация нитей
-		__syncthreads();
-		// перемножение двух матриц
-		for (size_t k = 0; k < blockDim.x; k++)
-		{
-			sum += as[threadIdx.y][k] * bs[k][threadIdx.x];
-		}
-		// синхронизация нитей
-		__syncthreads();
-	}
-
-	size_t index = bSize.width * indexY + indexX;
-	result[index] = sum;
-
-	if (blockIdx.x == 0 && threadIdx.x == 0)
-	{
-		resultSize->width = bSize.width;
-		resultSize->height = aSize.height;
-	}
-}
-
-//__global__ void matrixMult(const double* A, const double* B, double* C, int Acols, int Bcols)
+//__global__ void matrixMultGPUShared(const ll* a, const ll* b, ll* result, struct Size* resultSize, struct Size aSize, struct Size bSize)
 //{
+//	size_t indexX = blockDim.x * blockIdx.x + threadIdx.x;
+//	size_t indexY = blockDim.y * blockIdx.y + threadIdx.y;
+//
+//	if (indexX >= bSize.width || indexY >= aSize.height)
+//	{
+//		return;
+//	}
+//
 //	// индекс начала первой подматрицы А, которую
 //	// обрабатывает блок
-//	int aBegin = Acols * blockDim.y * blockIdx.y;
+//	size_t aBegin = aSize.width * blockDim.y * blockIdx.y;
 //	// индекс конца подматрицы А, которую обрабатывает блок
-//	int aEnd = aBegin + Acols - 1;
+//	size_t aEnd = aBegin + aSize.width - 1;
 //	// шаг для перебора подматриц А
-//	int aStep = blockDim.x;
+//	size_t aStep = blockDim.x;
 //	// индекс начала первой подматрицы В, которую
 //	// обрабатывает блок
-//	int bBegin = blockDim.x * blockIdx.x;
+//	size_t bBegin = blockDim.x * blockIdx.x;
 //	// шаг для перебора подматриц В
-//	int bStep = blockDim.y * Bcols;
+//	size_t bStep = blockDim.y * bSize.width;
 //
 //	// Выделение разделяемой памяти для подматриц
-//	__shared__ double as[TILE_SIZE][TILE_SIZE];
-//	__shared__ double bs[TILE_SIZE][TILE_SIZE];
+//	__shared__ ll as[TILE_SIZE][TILE_SIZE];
+//	__shared__ ll bs[TILE_SIZE][TILE_SIZE];
 //	// переменная для вычисления элемента подматрицы
-//	double sum = 0.0;
-//	for (int ia = aBegin, ib = bBegin; ia < aEnd; ia += aStep, ib += bStep)
+//	ll sum = 0;
+//	for (size_t ia = aBegin, ib = bBegin; ia < aEnd; ia += aStep, ib += bStep)
 //	{
 //		// загрузка подматриц А и В из глобальной памяти в
 //		// разделяемую
-//		as[threadIdx.y][threadIdx.x] = A[ia + Acols * threadIdx.y + threadIdx.x];
-//		bs[threadIdx.y][threadIdx.x] = B[ib + Bcols * threadIdx.y + threadIdx.x];
+//		as[threadIdx.y][threadIdx.x] = a[ia + aSize.width * threadIdx.y + threadIdx.x];
+//		bs[threadIdx.y][threadIdx.x] = b[ib + bSize.width * threadIdx.y + threadIdx.x];
 //		// синхронизация нитей
 //		__syncthreads();
 //		// перемножение двух матриц
-//		for (int k = 0; k < blockDim.x; k++)
+//		for (size_t k = 0; k < blockDim.x; k++)
 //		{
 //			sum += as[threadIdx.y][k] * bs[k][threadIdx.x];
 //		}
 //		// синхронизация нитей
 //		__syncthreads();
 //	}
-//	// индекс результирующего элемента в глобальной памяти
-//	int ind = Bcols * (blockDim.y * blockIdx.y + threadIdx.y) + blockDim.x * blockIdx.x + threadIdx.x;
-//	// запись элемента в глобальную память
-//	C[ind] = sum;
+//
+//	size_t index = bSize.width * indexY + indexX;
+//	result[index] = sum;
+//
+//	if (blockIdx.x == 0 && threadIdx.x == 0)
+//	{
+//		resultSize->width = bSize.width;
+//		resultSize->height = aSize.height;
+//	}
 //}
+
+__global__ void matrixMultGPUShared(const ll* a, const ll* b, ll* result, struct Size* resultSize, struct Size aSize, struct Size bSize)
+{
+	if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0 && threadIdx.y == 0)
+	{
+		resultSize->width = bSize.width;
+		resultSize->height = aSize.height;
+	}
+
+	__shared__ ll tileA[TILE_SIZE][TILE_SIZE];
+	__shared__ ll tileB[TILE_SIZE][TILE_SIZE];
+
+	int row = blockIdx.y * blockDim.y + threadIdx.y;
+	int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+	ll sum = 0;
+	for (int tileIdx = 0; tileIdx < (aSize.width + TILE_SIZE - 1) / TILE_SIZE; ++tileIdx)
+	{
+		// Загрузка tileA
+		int aRow = blockIdx.y * TILE_SIZE + threadIdx.y;
+		int aCol = tileIdx * TILE_SIZE + threadIdx.x;
+		if (aRow < aSize.height && aCol < aSize.width)
+		{
+			tileA[threadIdx.y][threadIdx.x] = a[aRow * aSize.width + aCol];
+		}
+		else
+		{
+			tileA[threadIdx.y][threadIdx.x] = 0;
+		}
+
+		// Загрузка tileB  
+		int bRow = tileIdx * TILE_SIZE + threadIdx.y;
+		int bCol = blockIdx.x * TILE_SIZE + threadIdx.x;
+		if (bRow < bSize.height && bCol < bSize.width)
+		{
+			tileB[threadIdx.y][threadIdx.x] = b[bRow * bSize.width + bCol];
+		}
+		else
+		{
+			tileB[threadIdx.y][threadIdx.x] = 0;
+		}
+		__syncthreads();
+
+		// Вычисление частичной суммы
+		for (int k = 0; k < TILE_SIZE; ++k) 
+		{
+			sum += tileA[threadIdx.y][k] * tileB[k][threadIdx.x];
+		}
+
+		__syncthreads();
+	}
+
+	// Запись результата
+	if (row < resultSize->height && col < resultSize->width) 
+	{
+		result[row * resultSize->width + col] = sum;
+	}
+}
+
 int main()
 {
 	srand(time(NULL));
