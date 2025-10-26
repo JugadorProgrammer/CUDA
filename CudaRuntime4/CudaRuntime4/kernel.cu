@@ -88,7 +88,7 @@ __global__ void gaussianBlurKernelShared(uchar* image, uchar* output, int width,
 	tile[(y % TILE_SIZE * TILE_SIZE + x % TILE_SIZE) * 4 + 1] = image[(y * width + x) * 4 + 1];
 	tile[(y % TILE_SIZE * TILE_SIZE + x % TILE_SIZE) * 4 + 2] = image[(y * width + x) * 4 + 2];
 	tile[(y % TILE_SIZE * TILE_SIZE + x % TILE_SIZE) * 4 + 3] = image[(y * width + x) * 4 + 3];
-
+	__syncthreads();
 	// Применяем ядро Гаусса к каждому каналу BGRA
 	for (int ky = -radius; ky <= radius; ++ky)
 	{
@@ -263,8 +263,8 @@ int main()
 	cudaStatus = cudaEventRecord(start);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaEventRecord(&start) failed!");
 
-	gaussianBlurKernel << <gridDim, blockDim >> > (devImage, devResultImage, width, height, devKernel, kernelSize);
-	//gaussianBlurKernelShared << <gridDim, blockDim >> > (devImage, devResultImage, width, height, devKernel, kernelSize);
+	//gaussianBlurKernel << <gridDim, blockDim >> > (devImage, devResultImage, width, height, devKernel, kernelSize);
+	gaussianBlurKernelShared << <gridDim, blockDim >> > (devImage, devResultImage, width, height, devKernel, kernelSize);
 
 	cudaStatus = cudaGetLastError();
 	CHECK_CUDA_ERROR(cudaStatus, "cudaGetLastError failed!");
