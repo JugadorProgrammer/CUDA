@@ -7,9 +7,11 @@
 #include <cstdlib>
 #include <ctime>
 #include <cmath>
+#include <string.h>
 
 #define ll long long
 #define MAX_TREAD_COUNT 1024
+#define CALC_TIME_MS(start, end) (((double)((end) - (start)) * 1000.0) / CLOCKS_PER_SEC)
 #define SHARED_MEMORY_SIZE MAX_TREAD_COUNT * sizeof(ll)
 
 #define DELETE_IF_EXISTS(ptr) \
@@ -82,6 +84,73 @@ __host__ void printDeviceProperties(const cudaDeviceProp& deviceProp)
 }
 
 // Фаза Up-sweep (редукция)
+void upsweep_cpu(ll* arr, int size, int stride)
+{
+	for (int threadId = 0; threadId < size; threadId++)
+	{
+		// Правильное условие: поток должен быть на позиции (k * 2 * stride - 1)
+		if ((threadId + 1) % (2 * stride) == 0)
+		{
+			int left_idx = threadId - stride;
+			if (left_idx >= 0)
+			{
+				arr[threadId] += arr[left_idx];
+			}
+		}
+	}
+}
+
+// Фаза Down-sweep (распространение)
+void downsweep_cpu(ll* arr, size_t size, int stride)
+{
+	for (int threadId = 0; threadId < size; threadId++)
+	{
+		// Потоки должны быть на позициях: stride*2-1, stride*4-1, stride*6-1, ...
+		if ((threadId + 1) % (2 * stride) == 0)
+		{
+			int left_idx = threadId - stride;
+			if (left_idx >= 0)
+			{
+				// Сохраняем значение левого элемента
+				ll temp = arr[left_idx];
+				// Перемещаем текущее значение в левый элемент
+				arr[left_idx] = arr[threadId];
+				// Добавляем сохраненное значение к текущему
+				arr[threadId] += temp;
+			}
+		}
+	}
+}
+
+__host__ void prefixAmount_cpu(ll** arr, int size)
+{
+	ll* source = *arr;
+	// Фаза Up-sweep
+	for (int stride = 1; stride < size; stride *= 2)
+	{
+		upsweep_cpu(source, size, stride);
+	}
+
+	ll total_sum;
+	// Сохраняем общую сумму и обнуляем последний элемент
+	total_sum = source[size - 1];
+	source[size - 1] = 0;
+
+	// Фаза Down-sweep
+	for (int stride = size / 2; stride >= 1; stride /= 2)
+	{
+		downsweep_cpu(source, size, stride);
+	}
+
+	ll* result = new ll[size];
+
+	memcpy(result, source + 1, (size - 1) * sizeof(ll));
+	memcpy(result + (size - 1), &total_sum, sizeof(ll));
+	*arr = result;
+}
+
+
+// Фаза Up-sweep (редукция)
 __global__ void upsweep_kernel(ll* arr, int size, int stride)
 {
 	int threadId = blockDim.x * blockIdx.x + threadIdx.x;
@@ -115,7 +184,7 @@ __global__ void downsweep_kernel(ll* arr, size_t size, int stride)
 	if ((threadId + 1) % (2 * stride) == 0)
 	{
 		int left_idx = threadId - stride;
-		if (left_idx >= 0) 
+		if (left_idx >= 0)
 		{
 			// Сохраняем значение левого элемента
 			ll temp = arr[left_idx];
@@ -127,18 +196,20 @@ __global__ void downsweep_kernel(ll* arr, size_t size, int stride)
 	}
 }
 
-__host__ cudaError_t prefixAmount(ll* source, int size)
+__host__ cudaError_t prefixAmount(ll** arr, int size)
 {
 	cudaError_t cudaStatus;
+	ll* source = *arr;
 	for (int stride = 1; stride < size; stride *= 2)
 	{
-		int blocks_per_grid = ceill((double)size / MAX_TREAD_COUNT);
+		int num_threads_needed = (size + (2 * stride) - 1) / (2 * stride);
+		int blocks_per_grid = (num_threads_needed + MAX_TREAD_COUNT - 1) / MAX_TREAD_COUNT;
 		if (blocks_per_grid == 0)
 		{
 			blocks_per_grid = 1;
 		}
 
-		upsweep_kernel<<<blocks_per_grid, MAX_TREAD_COUNT>>>(source, size, stride);
+		upsweep_kernel << <blocks_per_grid, MAX_TREAD_COUNT >> > (source, size, stride);
 		cudaStatus = cudaDeviceSynchronize();
 		if (cudaStatus != cudaSuccess)
 		{
@@ -148,12 +219,23 @@ __host__ cudaError_t prefixAmount(ll* source, int size)
 
 	ll total_sum;
 	// Сохраняем общую сумму и обнуляем последний элемент
-	cudaMemcpy(&total_sum, &source[size - 1], sizeof(ll), cudaMemcpyDeviceToHost);
-	cudaMemset(&source[size - 1], 0, sizeof(ll));
+	cudaStatus = cudaMemcpy(&total_sum, &source[size - 1], sizeof(ll), cudaMemcpyDeviceToHost);
+	if (cudaStatus != cudaSuccess)
+	{
+		return cudaStatus;
+	}
+
+	cudaStatus = cudaMemset(&source[size - 1], 0, sizeof(ll));
+	if (cudaStatus != cudaSuccess)
+	{
+		return cudaStatus;
+	}
 
 	for (int stride = size / 2; stride >= 1; stride /= 2)
 	{
-		int blocks_per_grid = ceill((double)size / MAX_TREAD_COUNT);
+		int num_threads_needed = (size + (2 * stride) - 1) / (2 * stride);
+		int blocks_per_grid = (num_threads_needed + MAX_TREAD_COUNT - 1) / MAX_TREAD_COUNT;
+
 		if (blocks_per_grid == 0)
 		{
 			blocks_per_grid = 1;
@@ -166,25 +248,50 @@ __host__ cudaError_t prefixAmount(ll* source, int size)
 			return cudaStatus;
 		}
 	}
+
+	ll* result;
+	cudaStatus = cudaMalloc(&result, size * sizeof(ll));
+	if (cudaStatus != cudaSuccess)
+	{
+		return cudaStatus;
+	}
+
+	cudaStatus = cudaMemcpy(result, source + 1, (size - 1) * sizeof(ll), cudaMemcpyDeviceToDevice);
+	if (cudaStatus != cudaSuccess)
+	{
+		return cudaStatus;
+	}
+
+	cudaStatus = cudaMemset(result + (size - 1), total_sum, 1);
+	if (cudaStatus != cudaSuccess)
+	{
+		return cudaStatus;
+	}
+
+	*arr = result;
 	return cudaSuccess;
 }
 
-int main()
+__host__ void CPU(ll* arr, const size_t arraySize)
 {
-	srand(time(NULL));
+	clock_t start, end;
 
-	ll* source = NULL, * devSource = NULL, * result = NULL, * devResult = NULL;
+	start = clock();
+	prefixAmount_cpu(&arr, arraySize);// закончить
+	end = clock();
+
+	float milliseconds = CALC_TIME_MS(start, end);
+	printf("CPU: Time = %f ms\n", milliseconds);
+	//printArray(arr, arraySize);
+}
+
+__host__ void GPU(ll* source, const size_t arraySize)
+{
+	ll* devSource = NULL, * result = NULL, * devResult = NULL;
 	cudaError_t cudaStatus;
 	cudaEvent_t start, stop;
-	cudaDeviceProp deviceProp;
 	float milliseconds = 0;
-
-	const size_t arraySize = 8;
 	const dim3 blockDim(MAX_TREAD_COUNT), gridDim((size_t)ceil(arraySize / ((double)blockDim.x)));
-
-	source = new ll[arraySize];
-	fillArray(source, arraySize);
-	printArray(source, arraySize);
 
 	///////////////////////////////////////GPU/////////////////////////////////////////////////////
 	cudaStatus = cudaEventCreate(&start);
@@ -192,11 +299,6 @@ int main()
 
 	cudaStatus = cudaEventCreate(&stop);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaEventCreate(&stop) failed!");
-
-	cudaStatus = cudaGetDeviceProperties(&deviceProp, 0);
-	CHECK_CUDA_ERROR(cudaStatus, "cudaGetDeviceProperties failed!");
-
-	printDeviceProperties(deviceProp);
 
 	cudaStatus = cudaMalloc(&devSource, arraySize * sizeof(ll));
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMalloc(&devSource failed!");
@@ -211,7 +313,7 @@ int main()
 	cudaStatus = cudaEventRecord(start);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaEventRecord(&start) failed!");
 
-	cudaStatus = prefixAmount(devSource, arraySize);
+	cudaStatus = prefixAmount(&devSource, arraySize);
 	CHECK_CUDA_ERROR(cudaStatus, "prefixAmount failed!");
 
 	cudaStatus = cudaGetLastError();
@@ -234,11 +336,10 @@ int main()
 	cudaStatus = cudaMemcpy(result, devSource, arraySize * sizeof(ll), cudaMemcpyDeviceToHost);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMemcpy(&result failed!");
 
-	printArray(result, arraySize);
+	//printArray(result, arraySize);
 	printf("GPU time: %f ms\n", milliseconds);
 
 Finish:
-	DELETE_ARRAY_IF_EXISTS(source);
 	DELETE_ARRAY_IF_EXISTS(result);
 
 	// Освобождаем ресурсы
@@ -264,7 +365,29 @@ Finish:
 	// tracing tools such as Nsight and Visual Profiler to show complete traces.
 	cudaStatus = cudaDeviceReset();
 	PRINT_CUDA_ERROR(cudaStatus, "cudaDeviceReset failed!");
+}
 
+
+long main()
+{
+	const size_t arraySize = 1024 * 32;
+	ll* arr1 = new ll[arraySize], * arr2 = new ll[arraySize];
+
+	cudaDeviceProp deviceProp;
+	cudaGetDeviceProperties(&deviceProp, 0);
+
+	printDeviceProperties(deviceProp);
+
+	fillArray(arr1, arraySize);
+	//printArray(arr1, arraySize);
+
+	memcpy(arr2, arr1, arraySize * sizeof(ll));
+
+	CPU(arr1, arraySize);
+	GPU(arr2, arraySize);
+
+	delete[] arr1;
+	delete[] arr2;
 	system("pause");
 	return 0;
 }
