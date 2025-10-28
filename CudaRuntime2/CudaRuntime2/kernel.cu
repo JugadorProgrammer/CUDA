@@ -143,61 +143,6 @@ __global__ void matrixMultGPU(const ll* a, const ll* b, ll* result, struct Size*
 	result[index] = sum;
 }
 
-//__global__ void matrixMultGPUShared(const ll* a, const ll* b, ll* result, struct Size* resultSize, struct Size aSize, struct Size bSize)
-//{
-//	size_t indexX = blockDim.x * blockIdx.x + threadIdx.x;
-//	size_t indexY = blockDim.y * blockIdx.y + threadIdx.y;
-//
-//	if (indexX >= bSize.width || indexY >= aSize.height)
-//	{
-//		return;
-//	}
-//
-//	// индекс начала первой подматрицы А, которую
-//	// обрабатывает блок
-//	size_t aBegin = aSize.width * blockDim.y * blockIdx.y;
-//	// индекс конца подматрицы А, которую обрабатывает блок
-//	size_t aEnd = aBegin + aSize.width - 1;
-//	// шаг для перебора подматриц А
-//	size_t aStep = blockDim.x;
-//	// индекс начала первой подматрицы В, которую
-//	// обрабатывает блок
-//	size_t bBegin = blockDim.x * blockIdx.x;
-//	// шаг для перебора подматриц В
-//	size_t bStep = blockDim.y * bSize.width;
-//
-//	// Выделение разделяемой памяти для подматриц
-//	__shared__ ll as[TILE_SIZE][TILE_SIZE];
-//	__shared__ ll bs[TILE_SIZE][TILE_SIZE];
-//	// переменная для вычисления элемента подматрицы
-//	ll sum = 0;
-//	for (size_t ia = aBegin, ib = bBegin; ia < aEnd; ia += aStep, ib += bStep)
-//	{
-//		// загрузка подматриц А и В из глобальной памяти в
-//		// разделяемую
-//		as[threadIdx.y][threadIdx.x] = a[ia + aSize.width * threadIdx.y + threadIdx.x];
-//		bs[threadIdx.y][threadIdx.x] = b[ib + bSize.width * threadIdx.y + threadIdx.x];
-//		// синхронизация нитей
-//		__syncthreads();
-//		// перемножение двух матриц
-//		for (size_t k = 0; k < blockDim.x; k++)
-//		{
-//			sum += as[threadIdx.y][k] * bs[k][threadIdx.x];
-//		}
-//		// синхронизация нитей
-//		__syncthreads();
-//	}
-//
-//	size_t index = bSize.width * indexY + indexX;
-//	result[index] = sum;
-//
-//	if (blockIdx.x == 0 && threadIdx.x == 0)
-//	{
-//		resultSize->width = bSize.width;
-//		resultSize->height = aSize.height;
-//	}
-//}
-
 __global__ void matrixMultGPUShared(const ll* a, const ll* b, ll* result, struct Size* resultSize, struct Size aSize, struct Size bSize)
 {
 	if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0 && threadIdx.y == 0)
