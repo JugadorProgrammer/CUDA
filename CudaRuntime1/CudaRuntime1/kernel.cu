@@ -214,7 +214,6 @@ __global__ void reductionWithShared(ll* arr, ll* result, size_t size)
 __host__ void CPU(ll* arr, const size_t arraySize)
 {
 	clock_t start, end;
-	double cpu_time_used;
 
 	start = clock();
 	

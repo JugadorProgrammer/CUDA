@@ -9,7 +9,7 @@
 #include <cmath>
 #include <opencv2/opencv.hpp>
 
-// размер блока или размер подматрицы
+#define CLAMP(x, min, max) ((x) < (min) ? (min) : ((x) > (max) ? (max) : (x)))
 #define ll long long
 #define TILE_SIZE 32
 #define CALC_TIME_MS(start, end) (((double)((end) - (start)) * 1000.0) / CLOCKS_PER_SEC)
@@ -64,7 +64,8 @@ __host__ void printDeviceProperties(const cudaDeviceProp& deviceProp)
 	printf("Concurrent Kernels: %s\n", deviceProp.concurrentKernels ? "Yes" : "No");
 	printf("Integrated GPU: %s\n\n\n", deviceProp.integrated ? "Yes" : "No");
 }
-__global__ void gaussianBlurKernelShared(uchar* image, uchar* output, int width, int height, float* kernel, int kernelSize)
+
+__global__ void gaussianBlurKernelShared(uchar* image, uchar* output, int width, int height, float* kernel, size_t kernelSize)
 {
 	int tileStartX = blockIdx.x * blockDim.x;
 	int tileStartY = blockIdx.y * blockDim.y;
@@ -129,7 +130,6 @@ __global__ void gaussianBlurKernelShared(uchar* image, uchar* output, int width,
 		}
 	}
 
-	//// понять, почему тут всё падает
 	int outputIndex = (y * width + x) * 4;
 	output[outputIndex] = (uchar)(sumB);     // Blue
 	output[outputIndex + 1] = (uchar)(sumG); // Green
@@ -137,7 +137,7 @@ __global__ void gaussianBlurKernelShared(uchar* image, uchar* output, int width,
 	output[outputIndex + 3] = (uchar)(sumA); // Alpha
 }
 
-__global__ void gaussianBlurKernel(uchar* image, uchar* output, int width, int height, float* kernel, int kernelSize)
+__global__ void gaussianBlurKernel(uchar* image, uchar* output, int width, int height, float* kernel, size_t kernelSize)
 {
 	int x = (blockIdx.x * blockDim.x + threadIdx.x);
 	int y = (blockIdx.y * blockDim.y + threadIdx.y);
@@ -182,7 +182,6 @@ __global__ void gaussianBlurKernel(uchar* image, uchar* output, int width, int h
 		}
 	}
 
-	//// понять, почему тут всё падает
 	int outputIndex = (y * width + x) * 4;
 	output[outputIndex] = (uchar)(sumB);     // Blue
 	output[outputIndex + 1] = (uchar)(sumG); // Green
@@ -190,49 +189,93 @@ __global__ void gaussianBlurKernel(uchar* image, uchar* output, int width, int h
 	output[outputIndex + 3] = (uchar)(sumA); // Alpha
 }
 
-int main()
+__host__ void gaussianBlurKernelCPU(uchar* image, uchar* output, int width, int height, const float* kernel, const size_t kernelSize)
 {
-	srand(time(NULL));
-	uchar* devImage = NULL, * devResultImage = NULL;
-	float* kernel = NULL, * devKernel = NULL;
+	const int radius = kernelSize / 2;
+	// Создаем временный буфер
+	uchar* temp = new uchar[width * height];
+	memcpy(temp, image, width * height);
 
-	int width, height, channelsCount, kernelSize = 5, radius = 2;
-	cudaError_t cudaStatus;
-	cudaEvent_t start, stop;
-	cudaDeviceProp deviceProp;
-	float sigma = 1.0, milliseconds = 0, sum = 0;
-	kernel = new float[kernelSize * kernelSize];
-
-	for (int y = -radius; y <= radius; y++)
+	// Применяем фильтр по горизонтали
+	for (int y = 0; y < height; ++y) 
 	{
-		for (int x = -radius; x <= radius; x++)
+		for (int x = 0; x < width; ++x) 
 		{
-			float value = exp(-(x * x + y * y) / (2 * sigma * sigma));
-			kernel[(y + radius) * kernelSize + (x + radius)] = value;
-			sum += value;
+			if (x < 2 || y < 2 || x > width - 2 || y > height - 2)
+			{
+				continue;
+			}
+
+			float sumB = 0.0f, sumG = 0.0f, sumR = 0.0f, sumA = 0.0f;
+
+			// Применяем ядро Гаусса к каждому каналу BGRA
+			for (int ky = -radius; ky <= radius; ++ky)
+			{
+				for (int kx = -radius; kx <= radius; ++kx)
+				{
+					int posX = x + kx;
+					int posY = y + ky;
+
+					// Безопасная обработка граничных условий (clamp to edge)
+					if (posX > width - 1)
+					{
+						posX = width - 1;
+					}
+					if (posY > height - 1)
+					{
+						posY = height - 1;
+					}
+
+					// Получаем индекс пикселя в BGRA формате (4 канала на пиксель)
+					int pixelIndex = (posY * width + posX) * 4;
+					int kernelIndex = (ky + radius) * kernelSize + (kx + radius);
+					float kernelValue = kernel[kernelIndex];
+
+					//// Умножаем каждый канал на коэффициент ядра
+					sumB += image[pixelIndex] * kernelValue;     // Blue
+					sumG += image[pixelIndex + 1] * kernelValue; // Green
+					sumR += image[pixelIndex + 2] * kernelValue; // Red
+					sumA += image[pixelIndex + 3] * kernelValue; // Alpha
+				}
+			}
+
+			int outputIndex = (y * width + x) * 4;
+			output[outputIndex] = (uchar)(sumB);     // Blue
+			output[outputIndex + 1] = (uchar)(sumG); // Green
+			output[outputIndex + 2] = (uchar)(sumR); // Red
+			output[outputIndex + 3] = (uchar)(sumA); // Alpha
 		}
 	}
+}
 
-	// Нормализация
-	for (int i = 0; i < kernelSize * kernelSize; i++)
-	{
-		kernel[i] /= sum;
-	}
+__host__ void CPU(const cv::Mat& image, const float* kernel, const size_t kernelSize)
+{
+	cv::Mat resultMat = cv::Mat(image.rows, image.cols, image.type());
 
-	cv::Mat imageBGRA, resultMat, mat = cv::imread("source.png", cv::IMREAD_UNCHANGED);
-	// Проверка, что изображение загружено успешно
-	if (mat.empty())
-	{
-		fprintf(stderr, "Не удалось загрузить изображение!");
-		goto Finish;
-	}
-	cv::cvtColor(mat, imageBGRA, cv::COLOR_BGR2BGRA);
-	channelsCount = imageBGRA.channels();
-	width = imageBGRA.cols;
-	height = imageBGRA.rows;
+	printf("CPU start calculation\n");
+	clock_t start, end;
 
-	const dim3 blockDim(TILE_SIZE, TILE_SIZE), 
+	start = clock();
+	gaussianBlurKernelCPU(image.data, resultMat.data, image.cols, image.rows, kernel, kernelSize);
+	end = clock();
+
+	float milliseconds = CALC_TIME_MS(start, end);
+	printf("CPU: Time = %f ms\n", milliseconds);
+	cv::imwrite("СPU_Result.png", resultMat);
+}
+
+__host__ void GPU(const cv::Mat& image, const float* kernel, const size_t kernelSize)
+{
+	cudaError_t cudaStatus;
+	cudaEvent_t start, stop;
+	int width = image.cols, height = image.rows, channelsCount = image.channels();
+
+	float* devKernel = NULL, milliseconds = 0;
+	cv::Mat resultMat;
+	uchar* devImage = NULL, * devResultImage = NULL;
+	const dim3 blockDim(TILE_SIZE, TILE_SIZE),
 		gridDim((size_t)std::ceil((double)width / (double)TILE_SIZE), (size_t)std::ceil((double)height / (double)TILE_SIZE));
+
 	///////////////////////////////////////GPU/////////////////////////////////////////////////////
 	cudaStatus = cudaEventCreate(&start);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaEventCreate(&start) failed!");
@@ -240,10 +283,6 @@ int main()
 	cudaStatus = cudaEventCreate(&stop);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaEventCreate(&stop) failed!");
 
-	cudaStatus = cudaGetDeviceProperties(&deviceProp, 0);
-	CHECK_CUDA_ERROR(cudaStatus, "cudaGetDeviceProperties failed!");
-
-	printDeviceProperties(deviceProp);
 	cudaStatus = cudaMalloc(&devImage, width * height * channelsCount * sizeof(uchar));
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMalloc(&devImage failed!");
 
@@ -256,14 +295,110 @@ int main()
 	cudaStatus = cudaMemcpy(devKernel, kernel, kernelSize * kernelSize * sizeof(float), cudaMemcpyHostToDevice);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMemcpy(devKernel failed!");
 
-	cudaStatus = cudaMemcpy(devImage, imageBGRA.data, width * height * channelsCount * sizeof(uchar), cudaMemcpyHostToDevice);
+	cudaStatus = cudaMemcpy(devImage, image.data, width * height * channelsCount * sizeof(uchar), cudaMemcpyHostToDevice);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMemcpy(devImage failed!");
 
 	printf("GPU start calculation\n");
 	cudaStatus = cudaEventRecord(start);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaEventRecord(&start) failed!");
 
-	//gaussianBlurKernel << <gridDim, blockDim >> > (devImage, devResultImage, width, height, devKernel, kernelSize);
+	gaussianBlurKernel << <gridDim, blockDim >> > (devImage, devResultImage, width, height, devKernel, kernelSize);
+
+	cudaStatus = cudaGetLastError();
+	CHECK_CUDA_ERROR(cudaStatus, "cudaGetLastError failed!");
+
+	cudaStatus = cudaDeviceSynchronize();
+	CHECK_CUDA_ERROR(cudaStatus, "cudaDeviceSynchronize failed!");
+
+	cudaStatus = cudaEventRecord(stop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventRecord(&stop) failed!");
+
+	// Ждем завершения всех операций
+	cudaStatus = cudaEventSynchronize(stop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventSynchronize(&stop) failed!");
+
+	cudaStatus = cudaEventElapsedTime(&milliseconds, start, stop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventElapsedTime failed!");
+
+	resultMat = cv::Mat(image.rows, image.cols, image.type());
+	cudaStatus = cudaMemcpy(resultMat.data, devResultImage, width * height * channelsCount * sizeof(uchar), cudaMemcpyDeviceToHost);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaMemcpy(devResultImage failed!");
+
+	printf("GPU time: %f ms\n", milliseconds);
+
+	cv::imwrite("GPU_Result.png", resultMat);
+Finish:
+	resultMat.release();
+
+	// Освобождаем ресурсы
+	cudaStatus = cudaEventDestroy(start);
+	PRINT_CUDA_ERROR(cudaStatus, "cudaEventDestroy(start failed!");
+
+	cudaStatus = cudaEventDestroy(stop);
+	PRINT_CUDA_ERROR(cudaStatus, "cudaEventDestroy(stop failed!");
+
+	if (devImage)
+	{
+		cudaStatus = cudaFree(devImage);
+		PRINT_CUDA_ERROR(cudaStatus, "cudaFree(devImage failed!");
+	}
+
+	if (devResultImage)
+	{
+		cudaStatus = cudaFree(devResultImage);
+		PRINT_CUDA_ERROR(cudaStatus, "cudaFree(devResultImage failed!");
+	}
+
+	if (devKernel)
+	{
+		cudaStatus = cudaFree(devKernel);
+		PRINT_CUDA_ERROR(cudaStatus, "cudaFree(devKernel failed!");
+	}
+
+	// cudaDeviceReset must be called before exiting in order for profiling and
+	// tracing tools such as Nsight and Visual Profiler to show complete traces.
+	cudaStatus = cudaDeviceReset();
+	PRINT_CUDA_ERROR(cudaStatus, "cudaDeviceReset failed!");
+}
+
+__host__ void GPUShared(const cv::Mat& image, const float* kernel, const size_t kernelSize)
+{
+	cudaError_t cudaStatus;
+	cudaEvent_t start, stop;
+	int width = image.cols, height = image.rows, channelsCount = image.channels();
+
+	float* devKernel = NULL, milliseconds = 0;
+	cv::Mat resultMat;
+	uchar* devImage = NULL, * devResultImage = NULL;
+	const dim3 blockDim(TILE_SIZE, TILE_SIZE),
+		gridDim((size_t)std::ceil((double)width / (double)TILE_SIZE), (size_t)std::ceil((double)height / (double)TILE_SIZE));
+
+	///////////////////////////////////////GPU/////////////////////////////////////////////////////
+	cudaStatus = cudaEventCreate(&start);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventCreate(&start) failed!");
+
+	cudaStatus = cudaEventCreate(&stop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventCreate(&stop) failed!");
+
+	cudaStatus = cudaMalloc(&devImage, width * height * channelsCount * sizeof(uchar));
+	CHECK_CUDA_ERROR(cudaStatus, "cudaMalloc(&devImage failed!");
+
+	cudaStatus = cudaMalloc(&devResultImage, width * height * channelsCount * sizeof(uchar));
+	CHECK_CUDA_ERROR(cudaStatus, "cudaMalloc(&devResultImage failed!");
+
+	cudaStatus = cudaMalloc(&devKernel, kernelSize * kernelSize * sizeof(float));
+	CHECK_CUDA_ERROR(cudaStatus, "cudaMalloc(&devKernel failed!");
+
+	cudaStatus = cudaMemcpy(devKernel, kernel, kernelSize * kernelSize * sizeof(float), cudaMemcpyHostToDevice);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaMemcpy(devKernel failed!");
+
+	cudaStatus = cudaMemcpy(devImage, image.data, width * height * channelsCount * sizeof(uchar), cudaMemcpyHostToDevice);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaMemcpy(devImage failed!");
+
+	printf("Shared GPU start calculation\n");
+	cudaStatus = cudaEventRecord(start);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventRecord(&start) failed!");
+
 	gaussianBlurKernelShared << <gridDim, blockDim >> > (devImage, devResultImage, width, height, devKernel, kernelSize);
 
 	cudaStatus = cudaGetLastError();
@@ -282,15 +417,15 @@ int main()
 	cudaStatus = cudaEventElapsedTime(&milliseconds, start, stop);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaEventElapsedTime failed!");
 
-	resultMat = cv::Mat(imageBGRA.rows, imageBGRA.cols, imageBGRA.type());
+	resultMat = cv::Mat(image.rows, image.cols, image.type());
 	cudaStatus = cudaMemcpy(resultMat.data, devResultImage, width * height * channelsCount * sizeof(uchar), cudaMemcpyDeviceToHost);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMemcpy(devResultImage failed!");
 
-	printf("GPU time: %f ms\n", milliseconds);
+	printf("GPU Shared time: %f ms\n", milliseconds);
 
-	cv::imwrite("result.png", resultMat);
+	cv::imwrite("Shared_Result.png", resultMat);
 Finish:
-	DELETE_ARRAY_IF_EXISTS(kernel);
+	resultMat.release();
 
 	// Освобождаем ресурсы
 	cudaStatus = cudaEventDestroy(start);
@@ -305,6 +440,12 @@ Finish:
 		PRINT_CUDA_ERROR(cudaStatus, "cudaFree(devImage failed!");
 	}
 
+	if (devResultImage)
+	{
+		cudaStatus = cudaFree(devResultImage);
+		PRINT_CUDA_ERROR(cudaStatus, "cudaFree(devResultImage failed!");
+	}
+
 	if (devKernel)
 	{
 		cudaStatus = cudaFree(devKernel);
@@ -315,7 +456,57 @@ Finish:
 	// tracing tools such as Nsight and Visual Profiler to show complete traces.
 	cudaStatus = cudaDeviceReset();
 	PRINT_CUDA_ERROR(cudaStatus, "cudaDeviceReset failed!");
+}
 
+__host__ float* createKernel(size_t kernelSize, float sigma = 1.0)
+{
+	kernelSize |= 1; // должен быть нечётным
+	float* kernel = new float[kernelSize * kernelSize], sum = 0;
+	int radius = kernelSize / 2;
+
+	for (int y = -radius; y <= radius; ++y)
+	{
+		for (int x = -radius; x <= radius; ++x)
+		{
+			float value = exp(-(x * x + y * y) / (2 * sigma * sigma));
+			kernel[(y + radius) * kernelSize + (x + radius)] = value;
+			sum += value;
+		}
+	}
+
+	// Нормализация
+	for (int i = 0; i < kernelSize * kernelSize; ++i)
+	{
+		kernel[i] /= sum;
+	}
+
+	return kernel;
+}
+
+__host__ cv::Mat converToBgra(const char* fileName)
+{
+	cv::Mat imageBGRA, source = cv::imread(fileName, cv::IMREAD_UNCHANGED);
+	cv::cvtColor(source, imageBGRA, cv::COLOR_BGR2BGRA);
+	source.release();
+	return imageBGRA;
+}
+
+long main()
+{
+	const size_t kernelSize = 5;
+	cv::Mat image = converToBgra("source.png");
+	float* kernel = createKernel(kernelSize);
+	cudaDeviceProp deviceProp;
+
+	cudaGetDeviceProperties(&deviceProp, 0);
+	printDeviceProperties(deviceProp);
+
+	CPU(image, kernel, kernelSize);
+	GPU(image, kernel, kernelSize);
+	GPUShared(image, kernel, kernelSize);
+
+	delete[] kernel;
+	image.release();
 	system("pause");
 	return 0;
 }
