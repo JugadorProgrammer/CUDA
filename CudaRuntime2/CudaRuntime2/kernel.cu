@@ -7,11 +7,12 @@
 #include <cstdlib>
 #include <ctime>
 #include <cmath>
+#include <chrono>
 
 // размер блока или размер подматрицы
-#define ll long long
-#define FINAL_MATRIX_HEIGHT 1000.0
-#define FINAL_MATRIX_WIDTH 1000.0
+#define ll float
+#define FINAL_MATRIX_HEIGHT 1024.0
+#define FINAL_MATRIX_WIDTH 1024.0
 #define MAX_2D_TREAD_COUNT 32.0
 #define TILE_SIZE (size_t)MAX_2D_TREAD_COUNT
 #define CALC_TIME_MS(start, end) (((double)((end) - (start)) * 1000.0) / CLOCKS_PER_SEC)
@@ -64,7 +65,7 @@ __host__ void printMatrix(ll* matrix, const struct Size size, const char* matrix
 	{
 		for (size_t j = 0; j < size.width; ++j)
 		{
-			printf("%lld ", matrix[size.width * i + j]);
+			printf("%f ", matrix[size.width * i + j]);
 		}
 		printf("\n");
 	}
@@ -96,26 +97,86 @@ __host__ struct Size matrixMult(const ll* a, const ll* b, ll** result, struct Si
 
 __host__ void printDeviceProperties(const cudaDeviceProp& deviceProp)
 {
-	// Основная информация
-	printf("\n\nGPU: %s\n", deviceProp.name);
-	printf("Compute Capability: %d.%d\n", deviceProp.major, deviceProp.minor);
-	printf("Global Memory: %.2f GB\n", deviceProp.totalGlobalMem / 1073741824.0);
+	// ============ ОСНОВНАЯ ИНФОРМАЦИЯ О GPU ============
+	printf("\n\nGPU: %s\n", deviceProp.name);  // Название графического процессора
+	printf("Compute Capability: %d.%d\n", deviceProp.major, deviceProp.minor);  // Версия вычислительной возможности
+	printf("Global Memory: %.2f GB\n", deviceProp.totalGlobalMem / 1073741824.0);  // Общий объем глобальной памяти в GB
+	printf("Memory Bus Width: %d-bit\n", deviceProp.memoryBusWidth);  // Ширина шины памяти в битах
+	printf("Memory Clock Rate: %.2f GHz\n", deviceProp.memoryClockRate * 1e-6f);  // Тактовая частота памяти в GHz
 
-	// Блоки и сетка
-	printf("Max Threads per Block: %d\n", deviceProp.maxThreadsPerBlock);
-	printf("Max Block Dim: (%d, %d, %d)\n", deviceProp.maxThreadsDim[0], deviceProp.maxThreadsDim[1], deviceProp.maxThreadsDim[2]);
-	printf("Max Grid Dim: (%d, %d, %d)\n", deviceProp.maxGridSize[0], deviceProp.maxGridSize[1], deviceProp.maxGridSize[2]);
+	// Расчет теоретической пиковой пропускной способности памяти
+	float memoryBandwidth = 2.0f * deviceProp.memoryClockRate * 1e3f *
+		(deviceProp.memoryBusWidth / 8) / 1e9f;
+	printf("Theoretical Memory Bandwidth: %.2f GB/s\n", memoryBandwidth);
 
-	// Аппаратные характеристики
-	printf("Max blocks per multiprocessor: %d\n", deviceProp.maxBlocksPerMultiProcessor);
-	printf("Multiprocessors: %d\n", deviceProp.multiProcessorCount);
-	printf("Clock Rate: %.2f GHz\n", deviceProp.clockRate * 1e-6f);
-	printf("Shared Memory per Block: %zu KB\n", deviceProp.sharedMemPerBlock / 1024);
+	// ============ СТРУКТУРА БЛОКОВ И СЕТКИ ============
+	printf("Max Threads per Block: %d\n", deviceProp.maxThreadsPerBlock);  // Максимальное количество потоков в одном блоке
+	printf("Max Block Dim: (%d, %d, %d)\n", deviceProp.maxThreadsDim[0], deviceProp.maxThreadsDim[1], deviceProp.maxThreadsDim[2]);  // Максимальные размеры блока по осям X, Y, Z
+	printf("Max Grid Dim: (%d, %d, %d)\n", deviceProp.maxGridSize[0], deviceProp.maxGridSize[1], deviceProp.maxGridSize[2]);  // Максимальные размеры сетки по осям X, Y, Z
 
-	// Дополнительно
-	printf("Warp Size: %d\n", deviceProp.warpSize);
-	printf("Concurrent Kernels: %s\n", deviceProp.concurrentKernels ? "Yes" : "No");
-	printf("Integrated GPU: %s\n\n\n", deviceProp.integrated ? "Yes" : "No");
+	// ============ АППАРАТНЫЕ ХАРАКТЕРИСТИКИ ============
+	printf("Max blocks per multiprocessor: %d\n", deviceProp.maxBlocksPerMultiProcessor);  // Максимальное количество блоков на одном мультипроцессоре
+	printf("Multiprocessors: %d\n", deviceProp.multiProcessorCount);  // Количество мультипроцессоров (Streaming Multiprocessors - SM)
+	printf("Clock Rate: %.2f GHz\n", deviceProp.clockRate * 1e-6f);  // Тактовая частота ядер GPU в GHz
+	printf("Shared Memory per Block: %zu KB\n", deviceProp.sharedMemPerBlock / 1024);  // Объем разделяемой памяти на блок в KB
+	printf("Shared Memory per Multiprocessor: %zu KB\n", deviceProp.sharedMemPerMultiprocessor / 1024);  // Общий объем разделяемой памяти на мультипроцессор в KB
+	printf("Registers per Block: %d\n", deviceProp.regsPerBlock);  // Количество 32-битных регистров на блок
+	printf("Registers per Multiprocessor: %d\n", deviceProp.regsPerMultiprocessor);  // Общее количество регистров на мультипроцессоре
+
+	// Расчет теоретической производительности в FLOPS
+	// Вспомогательная функция для определения количества ядер на мультипроцессор
+	auto _ConvertSMVer2Cores = [](int major, int minor) -> int {
+		struct SMVersion { int major, minor, cores; };
+		SMVersion smVersions[] = {
+			{3, 0, 192}, {3, 5, 192}, {3, 7, 192},  // Kepler
+			{5, 0, 128}, {5, 2, 128}, {5, 3, 128},  // Maxwell
+			{6, 0, 64}, {6, 1, 128}, {6, 2, 128},   // Pascal
+			{7, 0, 64}, {7, 2, 64}, {7, 5, 64},     // Volta, Turing
+			{8, 0, 64}, {8, 6, 128}, {8, 9, 128},   // Ampere, Ada Lovelace
+			{9, 0, 128}                              // Hopper
+		};
+		for (const auto& sm : smVersions) {
+			if (sm.major == major && sm.minor == minor) {
+				return sm.cores;
+			}
+		}
+		return 128;  // Значение по умолчанию
+	};
+
+	float totalCores = deviceProp.multiProcessorCount *
+		_ConvertSMVer2Cores(deviceProp.major, deviceProp.minor);  // Общее количество CUDA ядер
+	float theoreticalFlops = totalCores * deviceProp.clockRate * 1e3f * 2;  // Теоретическая производительность FP32
+	printf("Theoretical FP32 Performance: %.2f GFLOPS\n", theoreticalFlops / 1e9f);  // Вывод в GFLOPS
+
+	// ============ ПАРАЛЛЕЛИЗМ И ВОЗМОЖНОСТИ ============
+	printf("Warp Size: %d\n", deviceProp.warpSize);  // Размер warp'а (основная единица выполнения)
+	printf("Max Threads per Multiprocessor: %d\n", deviceProp.maxThreadsPerMultiProcessor);  // Максимальное количество потоков на мультипроцессоре
+	printf("Concurrent Kernels: %s\n", deviceProp.concurrentKernels ? "Yes" : "No");  // Поддержка одновременного выполнения нескольких ядер
+	printf("Concurrent Copy/Execute: %s\n", deviceProp.deviceOverlap ? "Yes" : "No");  // Поддержка перекрытия копирования данных и вычислений
+	printf("Integrated GPU: %s\n", deviceProp.integrated ? "Yes" : "No");  // Является ли GPU интегрированным
+
+	// ============ КЭШ ПАМЯТЬ ============
+	printf("L2 Cache Size: %d KB\n", deviceProp.l2CacheSize / 1024);  // Размер L2 кэша в KB
+	printf("Persisting L2 Cache Max Size: %zu KB\n", deviceProp.persistingL2CacheMaxSize / 1024);  // Максимальный размер persistent L2 кэша в KB
+
+	// ============ ПОДДЕРЖКА РАЗЛИЧНЫХ ФУНКЦИЙ ============
+	printf("Unified Addressing: %s\n", deviceProp.unifiedAddressing ? "Yes" : "No");  // Единое адресное пространство для CPU и GPU
+	printf("Managed Memory: %s\n", deviceProp.managedMemory ? "Yes" : "No");  // Поддержка managed memory
+	printf("Compute Preemption: %s\n", deviceProp.computePreemptionSupported ? "Yes" : "No");  // Поддержка вытеснения вычислений
+	printf("Cooperative Launch: %s\n", deviceProp.cooperativeLaunch ? "Yes" : "No");  // Поддержка cooperative launch
+
+	// ============ ПОДДЕРЖКА АТОМАРНЫХ ОПЕРАЦИЙ ============
+	printf("Host Native Atomic Supported: %s\n", deviceProp.hostNativeAtomicSupported ? "Yes" : "No");  // Поддержка атомарных операций на host памяти
+	printf("Single To Double Precision Perf Ratio: %d\n", deviceProp.singleToDoublePrecisionPerfRatio);  // Соотношение производительности single/double precision
+
+	// ============ PCIe ИНФОРМАЦИЯ ============
+	printf("PCI Bus ID: %d\n", deviceProp.pciBusID);  // ID PCIe шины
+	printf("PCI Device ID: %d\n", deviceProp.pciDeviceID);  // ID PCIe устройства
+	printf("PCI Domain ID: %d\n", deviceProp.pciDomainID);  // ID PCIe домена
+
+	// ============ ПОДДЕРЖКА ECC И ДРАЙВЕРОВ ============
+	printf("ECC Enabled: %s\n", deviceProp.ECCEnabled ? "Yes" : "No");  // Включена ли коррекция ошибок (ECC)
+	printf("TCC Driver: %s\n\n\n", deviceProp.tccDriver ? "Yes" : "No");  // Используется ли TCC драйвер (Tesla Compute Cluster)
 }
 
 __global__ void matrixMultGPU(const ll* a, const ll* b, ll* result, struct Size* resultSize, struct Size aSize, struct Size bSize)
@@ -204,17 +265,17 @@ __global__ void matrixMultGPUShared(const ll* a, const ll* b, ll* result, struct
 
 __host__ void CPU(ll* a, ll* b, const Size& aSize, const Size& bSize)
 {
-	clock_t startCPU, endCPU;
 	printf("CPU start calculation\n");
 	ll* resultCPU = new ll[0];
+	
+	auto start = std::chrono::high_resolution_clock::now();
 
-	startCPU = clock();
 	Size resultSize = matrixMult(a, b, &resultCPU, aSize, bSize);
-	endCPU = clock();
-	float milliseconds = CALC_TIME_MS(startCPU, endCPU);
 
+	auto end = std::chrono::high_resolution_clock::now();
+	auto time = std::chrono::duration<double, std::milli>(end - start);
+	printf("CPU: Time = %f ms\n", time.count());
 	//printMatrix(resultCPU, resultSize, "CPU result");
-	printf("CPU time: %f ms\n", milliseconds);
 	delete[] resultCPU;
 }
 
@@ -222,6 +283,8 @@ __host__ void GPU(ll* a, ll* b, const Size& aSize, const Size& bSize)
 {
 	ll* resultGPU = NULL, * devA = NULL, * devB = NULL, * devResult = NULL, * result = NULL;
 	struct Size* resultSize = NULL, * devResultSize = NULL;
+
+	cudaStream_t streamA, streamB;
 	cudaError_t cudaStatus;
 	cudaEvent_t start, stop;
 	const dim3 blockDim(MAX_2D_TREAD_COUNT, MAX_2D_TREAD_COUNT), gridDim((size_t)ceil(FINAL_MATRIX_WIDTH / ((double)blockDim.x)), (size_t)ceil(FINAL_MATRIX_HEIGHT / ((double)blockDim.y)));
@@ -233,23 +296,32 @@ __host__ void GPU(ll* a, ll* b, const Size& aSize, const Size& bSize)
 	cudaStatus = cudaEventCreate(&stop);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaEventCreate(&stop) failed!");
 
-	cudaStatus = cudaMalloc(&devA, aSize.width * aSize.height * sizeof(ll));
+	cudaStatus = cudaStreamCreate(&streamA);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaStreamCreate(streamA failed!");
+
+	cudaStatus = cudaStreamCreate(&streamB);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaStreamCreate(stereamB failed!");
+
+	cudaStatus = cudaMallocAsync(&devA, aSize.width * aSize.height * sizeof(ll), streamA);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMalloc(&devA failed!");
 
-	cudaStatus = cudaMalloc(&devB, bSize.width * bSize.height * sizeof(ll));
+	cudaStatus = cudaMallocAsync(&devB, bSize.width * bSize.height * sizeof(ll), streamB);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMalloc(&devB failed!");
 
-	cudaStatus = cudaMalloc(&devResult, aSize.height * bSize.width * sizeof(ll));
+	cudaStatus = cudaMallocAsync(&devResult, aSize.height * bSize.width * sizeof(ll), streamA);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMalloc(&devResult failed!");
 
-	cudaStatus = cudaMalloc(&devResultSize, sizeof(Size));
+	cudaStatus = cudaMallocAsync(&devResultSize, sizeof(Size), streamB);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMalloc(&devResultSize failed!");
 
-	cudaStatus = cudaMemcpy(devA, a, aSize.width * aSize.height * sizeof(ll), cudaMemcpyHostToDevice);
+	cudaStatus = cudaMemcpyAsync(devA, a, aSize.width * aSize.height * sizeof(ll), cudaMemcpyHostToDevice, streamA);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMemcpy(devA failed!");
 
-	cudaStatus = cudaMemcpy(devB, b, bSize.width * bSize.height * sizeof(ll), cudaMemcpyHostToDevice);
+	cudaStatus = cudaMemcpyAsync(devB, b, bSize.width * bSize.height * sizeof(ll), cudaMemcpyHostToDevice, streamB);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMemcpy(devB failed!");
+
+	cudaStreamSynchronize(streamA);
+	cudaStreamSynchronize(streamB);
 
 	printf("GPU start calculation\n");
 	cudaStatus = cudaEventRecord(start);
@@ -296,6 +368,12 @@ Finish:
 	cudaStatus = cudaEventDestroy(stop);
 	PRINT_CUDA_ERROR(cudaStatus, "cudaEventDestroy(stop failed!");
 
+	cudaStatus = cudaStreamDestroy(streamA);
+	PRINT_CUDA_ERROR(cudaStatus, "cudaStreamDestroy(stereamA failed!");
+
+	cudaStatus = cudaStreamDestroy(streamB);
+	PRINT_CUDA_ERROR(cudaStatus, "cudaStreamDestroy(stereamB failed!");
+
 	if (devA)
 	{
 		cudaStatus = cudaFree(devA);
@@ -331,6 +409,7 @@ __host__ void GPUShared(ll* a, ll* b, const Size& aSize, const Size& bSize)
 	struct Size* resultSize = NULL, * devResultSize = NULL;
 	cudaError_t cudaStatus;
 	cudaEvent_t start, stop;
+	cudaStream_t streamA, streamB;
 	const dim3 blockDim(MAX_2D_TREAD_COUNT, MAX_2D_TREAD_COUNT), gridDim((size_t)ceil(FINAL_MATRIX_WIDTH / ((double)blockDim.x)), (size_t)ceil(FINAL_MATRIX_HEIGHT / ((double)blockDim.y)));
 	float milliseconds = 0;
 
@@ -340,23 +419,32 @@ __host__ void GPUShared(ll* a, ll* b, const Size& aSize, const Size& bSize)
 	cudaStatus = cudaEventCreate(&stop);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaEventCreate(&stop) failed!");
 
-	cudaStatus = cudaMalloc(&devA, aSize.width * aSize.height * sizeof(ll));
+	cudaStatus = cudaStreamCreate(&streamA);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaStreamCreate(streamA failed!");
+
+	cudaStatus = cudaStreamCreate(&streamB);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaStreamCreate(stereamB failed!");
+
+	cudaStatus = cudaMallocAsync(&devA, aSize.width * aSize.height * sizeof(ll), streamA);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMalloc(&devA failed!");
 
-	cudaStatus = cudaMalloc(&devB, bSize.width * bSize.height * sizeof(ll));
+	cudaStatus = cudaMallocAsync(&devB, bSize.width * bSize.height * sizeof(ll), streamB);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMalloc(&devB failed!");
 
-	cudaStatus = cudaMalloc(&devResult, aSize.height * bSize.width * sizeof(ll));
+	cudaStatus = cudaMallocAsync(&devResult, aSize.height * bSize.width * sizeof(ll), streamA);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMalloc(&devResult failed!");
 
-	cudaStatus = cudaMalloc(&devResultSize, sizeof(Size));
+	cudaStatus = cudaMallocAsync(&devResultSize, sizeof(Size), streamB);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMalloc(&devResultSize failed!");
 
-	cudaStatus = cudaMemcpy(devA, a, aSize.width * aSize.height * sizeof(ll), cudaMemcpyHostToDevice);
+	cudaStatus = cudaMemcpyAsync(devA, a, aSize.width * aSize.height * sizeof(ll), cudaMemcpyHostToDevice, streamA);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMemcpy(devA failed!");
 
-	cudaStatus = cudaMemcpy(devB, b, bSize.width * bSize.height * sizeof(ll), cudaMemcpyHostToDevice);
+	cudaStatus = cudaMemcpyAsync(devB, b, bSize.width * bSize.height * sizeof(ll), cudaMemcpyHostToDevice, streamB);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMemcpy(devB failed!");
+
+	cudaStreamSynchronize(streamA);
+	cudaStreamSynchronize(streamB);
 
 	printf("GPU start calculation\n");
 	cudaStatus = cudaEventRecord(start);
@@ -402,6 +490,12 @@ Finish:
 
 	cudaStatus = cudaEventDestroy(stop);
 	PRINT_CUDA_ERROR(cudaStatus, "cudaEventDestroy(stop failed!");
+
+	cudaStatus = cudaStreamDestroy(streamA);
+	PRINT_CUDA_ERROR(cudaStatus, "cudaStreamDestroy(stereamA failed!");
+
+	cudaStatus = cudaStreamDestroy(streamB);
+	PRINT_CUDA_ERROR(cudaStatus, "cudaStreamDestroy(stereamB failed!");
 
 	if (devA)
 	{
