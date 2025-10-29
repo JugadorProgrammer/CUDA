@@ -97,7 +97,7 @@ __host__ ll parallel_reduction(ll* array, size_t size, int num_threads)
 	HANDLE* threads = (HANDLE*)malloc(num_threads * sizeof(HANDLE));
 	ThreadData* data = (ThreadData*)malloc(num_threads * sizeof(ThreadData));
 
-	int chunk = ceil((double)size / num_threads);
+	int chunk = size / num_threads;
 	for (int i = 0; i < num_threads; ++i)
 	{
 		data[i].array = array;
@@ -362,7 +362,7 @@ Finish:
 long main()
 {
 	srand(time(NULL));
-	const size_t arraySize = 9000;
+	const size_t arraySize = 10000;
 	ll* arr = new ll[arraySize];
 
 	fillArray(arr, arraySize);

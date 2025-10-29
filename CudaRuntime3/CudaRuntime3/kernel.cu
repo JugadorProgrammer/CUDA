@@ -149,6 +149,55 @@ __host__ void prefixAmount_cpu(ll** arr, int size)
 	*arr = result;
 }
 
+__global__ void prefixSumKernelShared(ll* input, ll* output, size_t n)
+{
+	extern __shared__ int temp[];
+
+	int blockSize = blockDim.x;
+	int tid = threadIdx.x;
+	int blockId = blockIdx.x;
+	int globalIdx = blockId * blockSize * 2 + tid;
+
+	// Загрузка данных с двойной буферизацией для лучшей утилизации
+	int offset = blockSize;
+	temp[tid] = (globalIdx < n) ? input[globalIdx] : 0;
+	temp[tid + offset] = (globalIdx + blockSize < n) ? input[globalIdx + blockSize] : 0;
+
+	__syncthreads();
+
+	// Восходящая фаза (Blelloch scan)
+	for (int stride = 1; stride <= blockSize; stride *= 2) 
+	{
+		int index = (tid + 1) * stride * 2 - 1;
+		if (index < blockSize * 2) 
+		{
+			temp[index] += temp[index - stride];
+		}
+		__syncthreads();
+	}
+
+	// Нисходящая фаза
+	for (int stride = blockSize / 2; stride > 0; stride /= 2)
+	{
+		__syncthreads();
+		int index = (tid + 1) * stride * 2 - 1;
+		if (index + stride < blockSize * 2) 
+		{
+			temp[index + stride] += temp[index];
+		}
+	}
+	__syncthreads();
+
+	// Сохранение результата
+	if (globalIdx < n) 
+	{
+		output[globalIdx] = temp[tid];
+	}
+	if (globalIdx + blockSize < n) 
+	{
+		output[globalIdx + blockSize] = temp[tid + offset];
+	}
+}
 
 // Фаза Up-sweep (редукция)
 __global__ void upsweep_kernel(ll* arr, int size, int stride)
@@ -276,6 +325,7 @@ __host__ void CPU(ll* arr, const size_t arraySize)
 {
 	clock_t start, end;
 
+	printf("CPU start calculation\n");
 	start = clock();
 	prefixAmount_cpu(&arr, arraySize);// закончить
 	end = clock();
@@ -287,7 +337,7 @@ __host__ void CPU(ll* arr, const size_t arraySize)
 
 __host__ void GPU(ll* source, const size_t arraySize)
 {
-	ll* devSource = NULL, * result = NULL, * devResult = NULL;
+	ll* devSource = NULL, * result = NULL;
 	cudaError_t cudaStatus;
 	cudaEvent_t start, stop;
 	float milliseconds = 0;
@@ -302,9 +352,6 @@ __host__ void GPU(ll* source, const size_t arraySize)
 
 	cudaStatus = cudaMalloc(&devSource, arraySize * sizeof(ll));
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMalloc(&devSource failed!");
-
-	cudaStatus = cudaMalloc(&devResult, arraySize * sizeof(ll));
-	CHECK_CUDA_ERROR(cudaStatus, "cudaMalloc(&devResult failed!");
 
 	cudaStatus = cudaMemcpy(devSource, source, arraySize * sizeof(ll), cudaMemcpyHostToDevice);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMemcpy(devSource failed!");
@@ -355,6 +402,85 @@ Finish:
 		PRINT_CUDA_ERROR(cudaStatus, "cudaFree(devSource failed!");
 	}
 
+	// cudaDeviceReset must be called before exiting in order for profiling and
+	// tracing tools such as Nsight and Visual Profiler to show complete traces.
+	cudaStatus = cudaDeviceReset();
+	PRINT_CUDA_ERROR(cudaStatus, "cudaDeviceReset failed!");
+}
+
+__host__ void GPUShared(ll* source, const size_t arraySize)
+{
+	ll* devSource = NULL, * result = NULL, * devResult = NULL;
+	cudaError_t cudaStatus;
+	cudaEvent_t start, stop;
+	float milliseconds = 0;
+	const dim3 blockDim(MAX_TREAD_COUNT), gridDim((size_t)ceil(arraySize / ((double)blockDim.x)));
+
+	///////////////////////////////////////GPU/////////////////////////////////////////////////////
+	cudaStatus = cudaEventCreate(&start);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventCreate(&start) failed!");
+
+	cudaStatus = cudaEventCreate(&stop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventCreate(&stop) failed!");
+
+	cudaStatus = cudaMalloc(&devSource, arraySize * sizeof(ll));
+	CHECK_CUDA_ERROR(cudaStatus, "cudaMalloc(&devSource failed!");
+
+	cudaStatus = cudaMalloc(&devResult, arraySize * sizeof(ll));
+	CHECK_CUDA_ERROR(cudaStatus, "cudaMalloc(&devResult failed!");
+
+	cudaStatus = cudaMemcpy(devSource, source, arraySize * sizeof(ll), cudaMemcpyHostToDevice);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaMemcpy(devSource failed!");
+
+	printf("Shared GPU start calculation\n");
+	cudaStatus = cudaEventRecord(start);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventRecord(&start) failed!");
+
+	int numBlocks = (arraySize + MAX_TREAD_COUNT - 1) / MAX_TREAD_COUNT;
+	int sharedMemSize = MAX_TREAD_COUNT * sizeof(ll);
+
+	prefixSumKernelShared << <numBlocks, MAX_TREAD_COUNT, sharedMemSize >> > (devSource, devResult, arraySize);
+	CHECK_CUDA_ERROR(cudaStatus, "prefixAmount failed!");
+
+	cudaStatus = cudaGetLastError();
+	CHECK_CUDA_ERROR(cudaStatus, "cudaGetLastError failed!");
+
+	cudaStatus = cudaDeviceSynchronize();
+	CHECK_CUDA_ERROR(cudaStatus, "cudaDeviceSynchronize failed!");
+
+	cudaStatus = cudaEventRecord(stop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventRecord(&stop) failed!");
+
+	// Ждем завершения всех операций
+	cudaStatus = cudaEventSynchronize(stop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventSynchronize(&stop) failed!");
+
+	cudaStatus = cudaEventElapsedTime(&milliseconds, start, stop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventElapsedTime failed!");
+
+	result = new ll[arraySize];
+	cudaStatus = cudaMemcpy(result, devResult, arraySize * sizeof(ll), cudaMemcpyDeviceToHost);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaMemcpy(&result failed!");
+
+	//printArray(result, arraySize);
+	printf("Shared GPU time: %f ms\n", milliseconds);
+
+Finish:
+	DELETE_ARRAY_IF_EXISTS(result);
+
+	// Освобождаем ресурсы
+	cudaStatus = cudaEventDestroy(start);
+	PRINT_CUDA_ERROR(cudaStatus, "cudaEventDestroy(start failed!");
+
+	cudaStatus = cudaEventDestroy(stop);
+	PRINT_CUDA_ERROR(cudaStatus, "cudaEventDestroy(stop failed!");
+
+	if (devSource)
+	{
+		cudaStatus = cudaFree(devSource);
+		PRINT_CUDA_ERROR(cudaStatus, "cudaFree(devSource failed!");
+	}
+
 	if (devResult)
 	{
 		cudaStatus = cudaFree(devResult);
@@ -370,8 +496,8 @@ Finish:
 
 long main()
 {
-	const size_t arraySize = 1024 * 32;
-	ll* arr1 = new ll[arraySize], * arr2 = new ll[arraySize];
+	const size_t arraySize = 1 << 20;
+	ll* arr1 = new ll[arraySize], * arr2 = new ll[arraySize], * arr3 = new ll[arraySize];
 
 	cudaDeviceProp deviceProp;
 	cudaGetDeviceProperties(&deviceProp, 0);
@@ -379,15 +505,17 @@ long main()
 	printDeviceProperties(deviceProp);
 
 	fillArray(arr1, arraySize);
-	//printArray(arr1, arraySize);
-
+	
 	memcpy(arr2, arr1, arraySize * sizeof(ll));
+	memcpy(arr3, arr1, arraySize * sizeof(ll));
 
 	CPU(arr1, arraySize);
 	GPU(arr2, arraySize);
+	GPUShared(arr3, arraySize);
 
 	delete[] arr1;
 	delete[] arr2;
+	delete[] arr3;
 	system("pause");
 	return 0;
 }
