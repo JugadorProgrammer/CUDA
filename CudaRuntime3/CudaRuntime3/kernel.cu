@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <cmath>
+#include <chrono>
 #include <string.h>
 
 #define ll long long
@@ -207,6 +208,7 @@ __host__ void prefixAmount_cpu(ll** arr, int size)
 	memcpy(result, source + 1, (size - 1) * sizeof(ll));
 	memcpy(result + (size - 1), &total_sum, sizeof(ll));
 	*arr = result;
+	//printArray(result, size);
 }
 
 __global__ void prefixSumKernelShared(ll* input, ll* output, size_t n)
@@ -395,33 +397,38 @@ __host__ cudaError_t prefixAmount(ll** arr, int size)
 
 __host__ void CPU(ll* arr, const size_t arraySize)
 {
-	clock_t start, end;
+	auto start = std::chrono::high_resolution_clock::now();
 
-	printf("CPU start calculation\n");
-	start = clock();
 	prefixAmount_cpu(&arr, arraySize);// закончить
-	end = clock();
 
-	float milliseconds = CALC_TIME_MS(start, end);
-	printf("CPU: Time = %f ms\n", milliseconds);
-	//printArray(arr, arraySize);
+	auto end = std::chrono::high_resolution_clock::now();
+	auto time = std::chrono::duration<double, std::milli>(end - start);
+	printf("CPU: Time = %f ms\n", time.count());
 }
 
 __host__ void GPU(ll* source, const size_t arraySize)
 {
 	ll* devSource = NULL, * result = NULL;
 	cudaError_t cudaStatus;
+	cudaEvent_t memoryCopyStart, memoryCopyStop;
 	cudaEvent_t start, stop;
 	float milliseconds = 0;
 	const dim3 blockDim(MAX_TREAD_COUNT), gridDim((size_t)ceil(arraySize / ((double)blockDim.x)));
 
-	CHECK_CUDA_ERROR(cudaStatus, "cudaStreamCreate failed!");
+	cudaStatus = cudaEventCreate(&memoryCopyStart);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventCreate(&memoryCopyStart) failed!");
+
+	cudaStatus = cudaEventCreate(&memoryCopyStop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventCreate(&memoryCopyStop) failed!");
+
+	cudaStatus = cudaEventCreate(&stop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventCreate(&stop) failed!");
 
 	cudaStatus = cudaEventCreate(&start);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaEventCreate(&start) failed!");
 
-	cudaStatus = cudaEventCreate(&stop);
-	CHECK_CUDA_ERROR(cudaStatus, "cudaEventCreate(&stop) failed!");
+	cudaStatus = cudaEventRecord(memoryCopyStart);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventRecord(&memoryCopyStart) failed!");
 
 	cudaStatus = cudaMalloc(&devSource, arraySize * sizeof(ll));
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMalloc(&devSource failed!");
@@ -456,9 +463,20 @@ __host__ void GPU(ll* source, const size_t arraySize)
 	cudaStatus = cudaMemcpy(result, devSource, arraySize * sizeof(ll), cudaMemcpyDeviceToHost);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMemcpy(&result failed!");
 
-	//printArray(result, arraySize);
-	printf("GPU time: %f ms\n", milliseconds);
+	printf("GPU calculate: %f ms\n", milliseconds);
 
+	cudaStatus = cudaEventRecord(memoryCopyStop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventRecord(&memoryCopyStop) failed!");
+
+	// Ждем завершения всех операций
+	cudaStatus = cudaEventSynchronize(memoryCopyStop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventSynchronize(&memoryCopyStop) failed!");
+
+	cudaStatus = cudaEventElapsedTime(&milliseconds, memoryCopyStart, memoryCopyStop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventElapsedTime failed!");
+
+	printf("GPU time: %f ms\n", milliseconds);
+	//printArray(result, arraySize);
 Finish:
 	DELETE_ARRAY_IF_EXISTS(result);
 
@@ -468,6 +486,12 @@ Finish:
 
 	cudaStatus = cudaEventDestroy(stop);
 	PRINT_CUDA_ERROR(cudaStatus, "cudaEventDestroy(stop failed!");
+
+	cudaStatus = cudaEventDestroy(memoryCopyStart);
+	PRINT_CUDA_ERROR(cudaStatus, "cudaEventDestroy(memoryCopyStart failed!");
+
+	cudaStatus = cudaEventDestroy(memoryCopyStop);
+	PRINT_CUDA_ERROR(cudaStatus, "cudaEventDestroy(memoryCopyStop failed!");
 
 	if (devSource)
 	{
@@ -486,9 +510,15 @@ __host__ void GPUShared(ll* source, const size_t arraySize)
 	ll* devSource = NULL, * result = NULL, * devResult = NULL;
 	cudaError_t cudaStatus;
 	cudaEvent_t start, stop;
-	cudaStream_t stream;
+	cudaEvent_t memoryCopyStart, memoryCopyStop;
 	float milliseconds = 0;
 	const dim3 blockDim(MAX_TREAD_COUNT), gridDim((size_t)ceil(arraySize / ((double)blockDim.x)));
+
+	cudaStatus = cudaEventCreate(&memoryCopyStart);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventCreate(&memoryCopyStart) failed!");
+
+	cudaStatus = cudaEventCreate(&memoryCopyStop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventCreate(&memoryCopyStop) failed!");
 
 	cudaStatus = cudaEventCreate(&start);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaEventCreate(&start) failed!");
@@ -496,19 +526,18 @@ __host__ void GPUShared(ll* source, const size_t arraySize)
 	cudaStatus = cudaEventCreate(&stop);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaEventCreate(&stop) failed!");
 
-	cudaStatus = cudaStreamCreate(&stream);
-	CHECK_CUDA_ERROR(cudaStatus, "cudaStreamCreate failed!");
+	cudaStatus = cudaEventRecord(memoryCopyStart);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventRecord(&memoryCopyStart) failed!");
 
-	cudaStatus = cudaMallocAsync(&devSource, arraySize * sizeof(ll), stream);
+	cudaStatus = cudaMalloc(&devSource, arraySize * sizeof(ll));
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMalloc(&devSource failed!");
 
 	cudaStatus = cudaMalloc(&devResult, arraySize * sizeof(ll));
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMalloc(&devResult failed!");
 
-	cudaStatus = cudaMemcpyAsync(devSource, source, arraySize * sizeof(ll), cudaMemcpyHostToDevice, stream);
+	cudaStatus = cudaMemcpy(devSource, source, arraySize * sizeof(ll), cudaMemcpyHostToDevice);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMemcpy(devSource failed!");
 
-	cudaStreamSynchronize(stream);
 	printf("Shared GPU start calculation\n");
 	cudaStatus = cudaEventRecord(start);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaEventRecord(&start) failed!");
@@ -539,8 +568,19 @@ __host__ void GPUShared(ll* source, const size_t arraySize)
 	cudaStatus = cudaMemcpy(result, devResult, arraySize * sizeof(ll), cudaMemcpyDeviceToHost);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMemcpy(&result failed!");
 
+	cudaStatus = cudaEventRecord(memoryCopyStop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventRecord(&memoryCopyStop) failed!");
+
+	printf("Shared GPU calculate: %f ms\n", milliseconds);
+	// Ждем завершения всех операций
+	cudaStatus = cudaEventSynchronize(memoryCopyStop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventSynchronize(&memoryCopyStop) failed!");
+
+	cudaStatus = cudaEventElapsedTime(&milliseconds, memoryCopyStart, memoryCopyStop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventElapsedTime failed!");
+
+	printf("Shared GPU time: %f ms\n", milliseconds);  
 	//printArray(result, arraySize);
-	printf("Shared GPU time: %f ms\n", milliseconds);
 
 Finish:
 	DELETE_ARRAY_IF_EXISTS(result);
@@ -552,8 +592,11 @@ Finish:
 	cudaStatus = cudaEventDestroy(stop);
 	PRINT_CUDA_ERROR(cudaStatus, "cudaEventDestroy(stop failed!");
 
-	cudaStatus = cudaStreamDestroy(stream);
-	PRINT_CUDA_ERROR(cudaStatus, "cudaStreamDestroy failed!");
+	cudaStatus = cudaEventDestroy(memoryCopyStart);
+	PRINT_CUDA_ERROR(cudaStatus, "cudaEventDestroy(memoryCopyStart failed!");
+
+	cudaStatus = cudaEventDestroy(memoryCopyStop);
+	PRINT_CUDA_ERROR(cudaStatus, "cudaEventDestroy(memoryCopyStop failed!");
 
 	if (devSource)
 	{
@@ -591,6 +634,10 @@ long main()
 	CPU(arr1, arraySize);
 	GPU(arr2, arraySize);
 	GPUShared(arr3, arraySize);
+
+	/*printArray(arr1, arraySize);
+	printArray(arr2, arraySize);
+	printArray(arr3, arraySize);*/
 
 	delete[] arr1;
 	delete[] arr2;

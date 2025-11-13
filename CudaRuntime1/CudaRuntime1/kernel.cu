@@ -3,6 +3,7 @@
 #define NOMINMAX
 
 #include <cuda_runtime.h>
+#include <cooperative_groups.h>
 #include <device_launch_parameters.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -60,7 +61,7 @@ void fillArray(ll* arr, size_t length)
 {
 	for (size_t i = 0; i < length; ++i)
 	{
-		arr[i] = i;
+		arr[i] = 1;
 	}
 }
 
@@ -87,13 +88,13 @@ __host__  DWORD WINAPI worker(LPVOID param)
 	return 0;
 }
 
-__host__ ll parallel_reduction(ll *array, size_t size, int num_threads)
+__host__ ll reductionCPU(ll* array, size_t size, int num_threads)
 {
 	// Ограничиваем количество потоков размером массива
 	num_threads = std::min(num_threads, static_cast<int>(size));
 
 	// Функция для работы потока
-	auto worker = [&](int thread_id) 
+	auto worker = [&](int thread_id)
 	{
 		int chunk_size = size / num_threads;
 		int start = thread_id * chunk_size;
@@ -101,7 +102,7 @@ __host__ ll parallel_reduction(ll *array, size_t size, int num_threads)
 
 		// Локальная редукция для каждого потока
 		float local_sum = 0.0f;
-		for (int i = start; i < end; ++i) 
+		for (int i = start; i < end; ++i)
 		{
 			local_sum += array[i];
 		}
@@ -110,7 +111,7 @@ __host__ ll parallel_reduction(ll *array, size_t size, int num_threads)
 
 	// Запускаем потоки для первой фазы
 	std::thread* threads = new std::thread[num_threads];
-	for (int i = 0; i < num_threads; ++i) 
+	for (int i = 0; i < num_threads; ++i)
 	{
 		threads[i] = std::thread(worker, i);
 	}
@@ -124,26 +125,26 @@ __host__ ll parallel_reduction(ll *array, size_t size, int num_threads)
 
 	// Древовидная редукция результатов
 	int remaining = num_threads;
-	while (remaining > 1) 
+	while (remaining > 1)
 	{
 		int half = (remaining + 1) / 2;
 
 		std::thread* merge_threads = new std::thread[half];
-		for (int i = 0; i < half; ++i) 
+		for (int i = 0; i < half; ++i)
 		{
 			int second_idx = i + half;
 			if (second_idx < remaining)
 			{
-				merge_threads[i] = std::thread([&, i, second_idx]() 
+				merge_threads[i] = std::thread([&, i, second_idx]()
 					{
 						array[i] += array[second_idx];
 					});
 			}
 			else {
 				// Если нет пары, просто копируем значение
-				merge_threads[i] = std::thread([&, i]() 
+				merge_threads[i] = std::thread([&, i]()
 					{
-					// Значение уже на своем месте
+						// Значение уже на своем месте
 					});
 			}
 		}
@@ -161,91 +162,43 @@ __host__ ll parallel_reduction(ll *array, size_t size, int num_threads)
 
 __global__ void reduction(ll* arr, ll* result, size_t size)
 {
-	unsigned long threadCount = blockDim.x;
-	unsigned long threadIdxX = threadIdx.x;
-	// Сделаем так, чтобы кол-во потоков равнялось кол-ву элементов в массиве
-	long dif = ceil((double)(size) / (double)(threadCount));
-	if (dif > 2)
+	unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+	for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1)
 	{
-		long step = ceil((double)(size - threadCount * 2) / (double)(threadCount));
-		for (size_t i = threadCount * 2 + step * threadIdxX, j = 0; j < step; ++i, ++j)
+		if (threadIdx.x < s && i + s < size)
 		{
-			arr[threadIdxX] += arr[i];
+			arr[i] += arr[i + s];
 		}
-
-		size = threadCount * 2;
-	}
-
-	__syncthreads();
-	while (size > 1)
-	{
-		if (threadIdxX >= size / 2)
-		{
-			return;
-		}
-
-		if (threadIdxX == 0 && size % 2 != 0)
-		{
-			arr[0] += arr[--size];
-		}
-
-		arr[threadIdxX] += arr[size - 1 - threadIdxX];
 		__syncthreads();
-		size /= 2;
 	}
 
-	if (threadIdxX == 0)
-	{
-		(*result) = arr[0];
+	if (threadIdx.x == 0) {
+		atomicAdd(result, arr[i]);
 	}
 }
 
 __global__ void reductionWithShared(ll* arr, ll* result, size_t size)
 {
-	extern __shared__ ll sharedArr[];
-	unsigned long threadCount = blockDim.x;
-	unsigned long threadIdxX = threadIdx.x;
+	extern __shared__ ll sdata[];
 
-	sharedArr[threadIdxX] = arr[threadIdxX];
-	// Сделаем так, чтобы кол-во потоков равнялось кол-ву элементов в массиве
-	long dif = ceil((double)(size) / (double)(threadCount));
-	if (dif > 2)
-	{
-		long step = ceil((double)(size - threadCount * 2) / (double)(threadCount));
-		for (size_t i = threadCount * 2 + step * threadIdxX, j = 0; j < step; ++i, ++j)
-		{
-			sharedArr[threadIdxX] += arr[i];
-		}
+	unsigned int tid = threadIdx.x;
+	unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
 
-		size = threadCount * 2;
-	}
-
-	if (dif > 1 && size - 1 - threadIdxX > ceil(((double)threadCount) / 2.0))
-	{
-		sharedArr[size - 1 - threadIdxX] = arr[size - 1 - threadIdxX];
-	}
-
+	sdata[tid] = (i < size) ? arr[i] : 0;
 	__syncthreads();
-	while (size > 1)
+
+	for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1)
 	{
-		if (threadIdxX >= size / 2)
+		if (tid < s)
 		{
-			return;
+			sdata[tid] += sdata[tid + s];
 		}
-
-		if (threadIdxX == 0 && size % 2 != 0)
-		{
-			sharedArr[0] += sharedArr[--size];
-		}
-
-		sharedArr[threadIdxX] += sharedArr[size - 1 - threadIdxX];
 		__syncthreads();
-		size /= 2;
 	}
 
-	if (threadIdxX == 0)
-	{
-		(*result) = sharedArr[0];
+	if (tid == 0) {
+		atomicAdd(result, sdata[0]);
 	}
 }
 
@@ -253,7 +206,7 @@ __host__ void CPU(ll* arr, const size_t arraySize)
 {
 	auto start = std::chrono::high_resolution_clock::now();
 
-	ll result = parallel_reduction(arr, arraySize, MAX_CPU_LOGICAL_THREAD);
+	ll result = reductionCPU(arr, arraySize, MAX_CPU_LOGICAL_THREAD);
 
 	auto end = std::chrono::high_resolution_clock::now();
 	auto time = std::chrono::duration<double, std::milli>(end - start);
@@ -267,14 +220,19 @@ __host__ void GPU(ll* arr, const size_t arraySize)
 
 	cudaError_t cudaStatus;
 	// Создаем события для измерения времени
-	cudaEvent_t start, stop;
+	cudaEvent_t start, stop, memoryCopyStart, memoryCopyStop;
 	cudaEventCreate(&start);
 	cudaEventCreate(&stop);
+	cudaEventCreate(&memoryCopyStart);
+	cudaEventCreate(&memoryCopyStop);
 
 	// Создаем CUDA stream для асинхронной обработки
 	cudaStream_t stream;
 	cudaStatus = cudaStreamCreate(&stream);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaStreamCreate failed!");
+
+	cudaStatus = cudaEventRecord(memoryCopyStart);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventRecord(&memoryCopyStart) failed!");
 
 	// Инициализируем переменные
 	cudaStatus = cudaMallocAsync(&devArr, byteSize, stream);
@@ -290,8 +248,11 @@ __host__ void GPU(ll* arr, const size_t arraySize)
 	// Записываем начальное время
 	cudaEventRecord(start);
 
-	int threadsCount = minimum(MAX_GPU_THREADS_PER_BLOCK, arraySize);
-	reduction<<<1, threadsCount>>>(devArr, devResult, arraySize);
+	// Вычисление размеров запуска
+	int threadsPerBlock = MAX_GPU_THREADS_PER_BLOCK;
+	int blocksPerGrid = (arraySize + threadsPerBlock - 1) / threadsPerBlock;
+
+	reduction << <blocksPerGrid, threadsPerBlock >> > (devArr, devResult, arraySize);
 
 	// Записываем конечное время
 	cudaEventRecord(stop);
@@ -313,7 +274,17 @@ __host__ void GPU(ll* arr, const size_t arraySize)
 	cudaStatus = cudaMemcpy(result, devResult, sizeof(ll), cudaMemcpyDeviceToHost);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMemcpy failed!");
 
-	printf("GPU: Result = %f Time = %f ms\n", *result, milliseconds);
+	printf("GPU: Result = %f CalcTime = %f ms\n", *result, milliseconds);
+	cudaStatus = cudaEventRecord(memoryCopyStop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventRecord(&memoryCopyStop) failed!");
+	// Ждем завершения всех операций
+	cudaStatus = cudaEventSynchronize(memoryCopyStop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventSynchronize(&memoryCopyStop) failed!");
+
+	cudaStatus = cudaEventElapsedTime(&milliseconds, memoryCopyStart, memoryCopyStop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventElapsedTime failed!");
+
+	printf("GPU time: %f ms\n", milliseconds);
 Finish:
 	DELETE_IF_EXISTS(result);
 	// Освобождаем ресурсы
@@ -322,6 +293,12 @@ Finish:
 
 	cudaEventDestroy(stop);
 	PRINT_CUDA_ERROR(cudaStatus, "cudaEventDestroy(stop failed!");
+
+	cudaStatus = cudaEventDestroy(memoryCopyStart);
+	PRINT_CUDA_ERROR(cudaStatus, "cudaEventDestroy(memoryCopyStart failed!");
+
+	cudaStatus = cudaEventDestroy(memoryCopyStop);
+	PRINT_CUDA_ERROR(cudaStatus, "cudaEventDestroy(memoryCopyStop failed!");
 
 	cudaStatus = cudaStreamDestroy(stream);
 	PRINT_CUDA_ERROR(cudaStatus, "cudaStreamDestroy failed!");
@@ -340,11 +317,22 @@ __host__ void GPUShared(ll* arr, const size_t arraySize)
 	cudaError_t cudaStatus;
 	cudaStream_t stream;
 	cudaEvent_t start, stop;
+	cudaEvent_t memoryCopyStart, memoryCopyStop;
+
+	cudaStatus = cudaEventCreate(&memoryCopyStart);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventCreate(&memoryCopyStart) failed!");
+
+	cudaStatus = cudaEventCreate(&memoryCopyStop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventCreate(&memoryCopyStop) failed!");
+
 	cudaStatus = cudaEventCreate(&start);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaEventCreate failed!");
 
 	cudaStatus = cudaEventCreate(&stop);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaEventCreate failed!");
+
+	cudaStatus = cudaEventRecord(memoryCopyStart);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventRecord(&memoryCopyStart) failed!");
 
 	cudaStatus = cudaStreamCreate(&stream);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaStreamCreate failed!");
@@ -362,9 +350,13 @@ __host__ void GPUShared(ll* arr, const size_t arraySize)
 	// Записываем начальное время
 	cudaEventRecord(start);
 
-	int threadsCount = minimum(MAX_GPU_THREADS_PER_BLOCK, arraySize);
-	const int sharedMemorySize = threadsCount * 2 * sizeof(ll);
-	reductionWithShared<<<1, threadsCount, sharedMemorySize>>>(devArr, devResult, arraySize);
+	// Вычисление размеров запуска
+	int threadsPerBlock = MAX_GPU_THREADS_PER_BLOCK;
+	int blocksPerGrid = (arraySize + threadsPerBlock - 1) / threadsPerBlock;
+
+	// Для версии с shared memory нужно указать размер shared memory
+	size_t sharedMemSize = threadsPerBlock * sizeof(ll);
+	reductionWithShared << <blocksPerGrid, threadsPerBlock, sharedMemSize >> > (devArr, devResult, arraySize);
 
 	// Записываем конечное время
 	cudaEventRecord(stop);
@@ -378,15 +370,25 @@ __host__ void GPUShared(ll* arr, const size_t arraySize)
 	cudaStatus = cudaDeviceSynchronize();
 	CHECK_CUDA_ERROR(cudaStatus, "cudaDeviceSynchronize returned error after launching addKernel!");
 
-	// Вычисляем время выполнения
-	float milliseconds = 0;
-	cudaEventElapsedTime(&milliseconds, start, stop);
-
 	result = new ll();
 	cudaStatus = cudaMemcpy(result, devResult, sizeof(ll), cudaMemcpyDeviceToHost);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaMemcpy failed!");
 
-	printf("GPU_SHARED: Result = %f Time = %f ms\n", *result, milliseconds);
+	// Вычисляем время выполнения
+	float milliseconds = 0;
+	cudaEventElapsedTime(&milliseconds, start, stop);
+	printf("GPU_SHARED: Result = %f CalcTime = %f ms\n", *result, milliseconds);
+
+	cudaStatus = cudaEventRecord(memoryCopyStop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventRecord(&memoryCopyStop) failed!");
+	// Ждем завершения всех операций
+	cudaStatus = cudaEventSynchronize(memoryCopyStop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventSynchronize(&memoryCopyStop) failed!");
+
+	cudaStatus = cudaEventElapsedTime(&milliseconds, memoryCopyStart, memoryCopyStop);
+	CHECK_CUDA_ERROR(cudaStatus, "cudaEventElapsedTime failed!");
+
+	printf("Shared GPU time: %f ms\n", milliseconds);
 Finish:
 	DELETE_IF_EXISTS(result);
 	// Освобождаем ресурсы
@@ -395,6 +397,12 @@ Finish:
 
 	cudaEventDestroy(stop);
 	PRINT_CUDA_ERROR(cudaStatus, "cudaEventDestroy(stop failed!");
+
+	cudaStatus = cudaEventDestroy(memoryCopyStart);
+	PRINT_CUDA_ERROR(cudaStatus, "cudaEventDestroy(memoryCopyStart failed!");
+
+	cudaStatus = cudaEventDestroy(memoryCopyStop);
+	PRINT_CUDA_ERROR(cudaStatus, "cudaEventDestroy(memoryCopyStop failed!");
 
 	cudaStatus = cudaStreamDestroy(stream);
 	PRINT_CUDA_ERROR(cudaStatus, "cudaStreamDestroy failed!");
@@ -487,7 +495,7 @@ __host__ void printDeviceProperties(const cudaDeviceProp& deviceProp)
 long main()
 {
 	srand(time(NULL));
-	const size_t arraySize = 2 << 20;
+	const size_t arraySize = 1 << 20;
 	ll* arr = new ll[arraySize], * arr1 = new ll[arraySize];
 
 	cudaDeviceProp deviceProp;
