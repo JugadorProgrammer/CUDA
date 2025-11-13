@@ -205,10 +205,10 @@ __host__ void prefixAmount_cpu(ll** arr, int size)
 
 	ll* result = new ll[size];
 
-	memcpy(result, source + 1, (size - 1) * sizeof(ll));
+	/*memcpy(result, source + 1, (size - 1) * sizeof(ll));
 	memcpy(result + (size - 1), &total_sum, sizeof(ll));
-	*arr = result;
-	//printArray(result, size);
+	*arr = result;*/
+	printArray(*arr, size);
 }
 
 __global__ void prefixSumKernelShared(ll* input, ll* output, size_t n)
@@ -372,7 +372,7 @@ __host__ cudaError_t prefixAmount(ll** arr, int size)
 		}
 	}
 
-	ll* result;
+	/*ll* result;
 	cudaStatus = cudaMalloc(&result, size * sizeof(ll));
 	if (cudaStatus != cudaSuccess)
 	{
@@ -391,7 +391,7 @@ __host__ cudaError_t prefixAmount(ll** arr, int size)
 		return cudaStatus;
 	}
 
-	*arr = result;
+	*arr = result;*/
 	return cudaSuccess;
 }
 
@@ -476,7 +476,9 @@ __host__ void GPU(ll* source, const size_t arraySize)
 	CHECK_CUDA_ERROR(cudaStatus, "cudaEventElapsedTime failed!");
 
 	printf("GPU time: %f ms\n", milliseconds);
-	//printArray(result, arraySize);
+
+
+	printArray(result, arraySize);
 Finish:
 	DELETE_ARRAY_IF_EXISTS(result);
 
@@ -579,8 +581,11 @@ __host__ void GPUShared(ll* source, const size_t arraySize)
 	cudaStatus = cudaEventElapsedTime(&milliseconds, memoryCopyStart, memoryCopyStop);
 	CHECK_CUDA_ERROR(cudaStatus, "cudaEventElapsedTime failed!");
 
-	printf("Shared GPU time: %f ms\n", milliseconds);  
-	//printArray(result, arraySize);
+	printf("Shared GPU time: %f ms\n", milliseconds); 
+
+	memcpy(source + 1, result, (arraySize - 1) * sizeof(ll));
+	source[0] = 0;
+	printArray(source, arraySize);
 
 Finish:
 	DELETE_ARRAY_IF_EXISTS(result);
@@ -618,7 +623,7 @@ Finish:
 
 long main()
 {
-	const size_t arraySize = 1 << 20;
+	const size_t arraySize = 8;
 	ll* arr1 = new ll[arraySize], * arr2 = new ll[arraySize], * arr3 = new ll[arraySize];
 
 	cudaDeviceProp deviceProp;
